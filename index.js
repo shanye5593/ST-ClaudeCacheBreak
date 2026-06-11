@@ -20,6 +20,7 @@ let logEntries = [];
 let logElement = null;
 let lastPromptSnapshot = null;
 let lastDirectTestReport = null;
+let csrfTokenCache = null;
 
 function loadSettings() {
     try {
@@ -120,6 +121,14 @@ function getApiRoot(baseUrl) {
 
 function buildApiUrl(baseUrl, path) {
     return `${getApiRoot(baseUrl)}${path}`;
+}
+
+function getOpenAiBaseUrl(baseUrl) {
+    const normalized = normalizeBaseUrl(baseUrl)
+        .replace(/\/chat\/completions$/i, '')
+        .replace(/\/models$/i, '');
+
+    return /\/v1$/i.test(normalized) ? normalized : `${normalized}/v1`;
 }
 
 function extractUsage(responseJson) {
@@ -522,16 +531,7 @@ function applyCacheBreaks(messages) {
     };
 }
 
-async function sendDirectChatCompletion({ url, apiKey, body }) {
-    const startedAt = performance.now();
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-    });
+async function parseResponse(response, startedAt) {
     const text = await response.text();
     let json = null;
 
@@ -551,12 +551,25 @@ async function sendDirectChatCompletion({ url, apiKey, body }) {
     };
 }
 
-async function runDirectCacheTest({ baseUrl, apiKey, model, maxTokens, temperature }) {
+async function sendDirectChatCompletion({ url, apiKey, body }) {
+    const startedAt = performance.now();
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+    });
+
+    return parseResponse(response, startedAt);
+}
+
+function buildChatCompletionsBody({ model, maxTokens, temperature }) {
     if (!lastPromptSnapshot?.chat?.length) {
         throw new Error('No converted prompt snapshot is available yet. Trigger one SillyTavern generation first.');
     }
 
-    const url = buildApiUrl(baseUrl, '/v1/chat/completions');
     const requestBody = {
         model,
         messages: JSON.parse(JSON.stringify(lastPromptSnapshot.chat)),
@@ -567,15 +580,14 @@ async function runDirectCacheTest({ baseUrl, apiKey, model, maxTokens, temperatu
         requestBody.temperature = Number(temperature);
     }
 
-    const first = await sendDirectChatCompletion({ url, apiKey, body: requestBody });
-    const second = await sendDirectChatCompletion({ url, apiKey, body: requestBody });
+    return requestBody;
+}
 
+function buildCacheTestReport({ transport, request, first, second }) {
     return {
         exportedAt: new Date().toISOString(),
-        request: {
-            url,
-            body: requestBody,
-        },
+        transport,
+        request,
         promptSnapshot: lastPromptSnapshot,
         first,
         second,
@@ -590,6 +602,135 @@ async function runDirectCacheTest({ baseUrl, apiKey, model, maxTokens, temperatu
             ),
         },
     };
+}
+
+async function runDirectCacheTest({ baseUrl, apiKey, model, maxTokens, temperature }) {
+    const url = buildApiUrl(baseUrl, '/v1/chat/completions');
+    const requestBody = buildChatCompletionsBody({ model, maxTokens, temperature });
+    const first = await sendDirectChatCompletion({ url, apiKey, body: requestBody });
+    const second = await sendDirectChatCompletion({ url, apiKey, body: requestBody });
+
+    return buildCacheTestReport({
+        transport: 'browser-direct',
+        request: {
+            url,
+            body: requestBody,
+        },
+        first,
+        second,
+    });
+}
+
+function tryWindowGetRequestHeaders() {
+    const fn = window.getRequestHeaders;
+
+    if (typeof fn !== 'function') {
+        return null;
+    }
+
+    try {
+        return fn();
+    } catch {
+        return null;
+    }
+}
+
+function tryContextGetRequestHeaders() {
+    const context = window.SillyTavern?.getContext?.();
+
+    if (typeof context?.getRequestHeaders !== 'function') {
+        return null;
+    }
+
+    try {
+        return context.getRequestHeaders();
+    } catch {
+        return null;
+    }
+}
+
+async function fetchCsrfToken() {
+    if (csrfTokenCache) {
+        return csrfTokenCache;
+    }
+
+    try {
+        const response = await fetch('/csrf-token', { method: 'GET', credentials: 'same-origin' });
+
+        if (!response.ok) {
+            return null;
+        }
+
+        const data = await response.json();
+
+        if (data?.token) {
+            csrfTokenCache = data.token;
+            return csrfTokenCache;
+        }
+    } catch {}
+
+    return null;
+}
+
+async function getTavernRequestHeaders() {
+    const headerSources = [tryWindowGetRequestHeaders, tryContextGetRequestHeaders];
+
+    for (const getHeaders of headerSources) {
+        const headers = getHeaders();
+
+        if (headers && typeof headers === 'object') {
+            return { ...headers, 'Content-Type': 'application/json' };
+        }
+    }
+
+    const token = await fetchCsrfToken();
+
+    if (token) {
+        return { 'Content-Type': 'application/json', 'X-CSRF-Token': token };
+    }
+
+    throw new Error('Could not get SillyTavern request headers or CSRF token.');
+}
+
+async function sendTavernBackendChatCompletion({ baseUrl, apiKey, body }) {
+    const startedAt = performance.now();
+    const headers = await getTavernRequestHeaders();
+    const response = await fetch('/api/backends/chat-completions/generate', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+            chat_completion_source: 'custom',
+            custom_url: getOpenAiBaseUrl(baseUrl),
+            model: body.model,
+            messages: body.messages,
+            temperature: body.temperature,
+            max_tokens: body.max_tokens,
+            stream: false,
+            custom_include_headers: JSON.stringify({
+                Authorization: `Bearer ${apiKey}`,
+            }),
+        }),
+    });
+
+    return parseResponse(response, startedAt);
+}
+
+async function runTavernBackendCacheTest({ baseUrl, apiKey, model, maxTokens, temperature }) {
+    const requestBody = buildChatCompletionsBody({ model, maxTokens, temperature });
+    const request = {
+        url: '/api/backends/chat-completions/generate',
+        upstreamBaseUrl: getOpenAiBaseUrl(baseUrl),
+        body: requestBody,
+    };
+    const first = await sendTavernBackendChatCompletion({ baseUrl, apiKey, body: requestBody });
+    const second = await sendTavernBackendChatCompletion({ baseUrl, apiKey, body: requestBody });
+
+    return buildCacheTestReport({
+        transport: 'tavern-backend',
+        request,
+        first,
+        second,
+    });
 }
 
 function createSettingsPanel() {
@@ -620,7 +761,7 @@ function createSettingsPanel() {
             <span>Mirror logs to browser console</span>
         </label>
         <div class="claude-cache-break-direct">
-            <div class="claude-cache-break-subtitle">Browser direct cache test</div>
+            <div class="claude-cache-break-subtitle">Plugin cache tests</div>
             <label class="claude-cache-break-field">
                 <span>Base URL</span>
                 <input id="claude_cache_break_direct_base_url" class="text_pole" type="text" placeholder="https://api.pioneer.ai or https://api.pioneer.ai/v1">
@@ -644,10 +785,11 @@ function createSettingsPanel() {
                 </label>
             </div>
             <div class="claude-cache-break-actions">
-                <button id="claude_cache_break_direct_test" class="menu_button">Direct test x2</button>
-                <button id="claude_cache_break_export_direct" class="menu_button">Export direct report</button>
+                <button id="claude_cache_break_tavern_backend_test" class="menu_button">Tavern backend test x2</button>
+                <button id="claude_cache_break_direct_test" class="menu_button">Browser direct test x2</button>
+                <button id="claude_cache_break_export_direct" class="menu_button">Export test report</button>
             </div>
-            <div id="claude_cache_break_direct_status" class="claude-cache-break-status">Trigger one normal generation first, then test the latest converted prompt.</div>
+            <div id="claude_cache_break_direct_status" class="claude-cache-break-status">Trigger one normal generation first, then test the latest converted prompt. Try Tavern backend first; browser direct may fail from CORS.</div>
         </div>
         <div class="claude-cache-break-actions">
             <button id="claude_cache_break_export_prompt" class="menu_button">Export prompt JSON</button>
@@ -666,6 +808,7 @@ function createSettingsPanel() {
     const directModelInput = panel.querySelector('#claude_cache_break_direct_model');
     const directMaxTokensInput = panel.querySelector('#claude_cache_break_direct_max_tokens');
     const directTemperatureInput = panel.querySelector('#claude_cache_break_direct_temperature');
+    const tavernBackendTestButton = panel.querySelector('#claude_cache_break_tavern_backend_test');
     const directTestButton = panel.querySelector('#claude_cache_break_direct_test');
     const exportDirectButton = panel.querySelector('#claude_cache_break_export_direct');
     const directStatusElement = panel.querySelector('#claude_cache_break_direct_status');
@@ -706,21 +849,22 @@ function createSettingsPanel() {
     directMaxTokensInput.addEventListener('input', saveDirectSettings);
     directTemperatureInput.addEventListener('input', saveDirectSettings);
 
-    directTestButton.addEventListener('click', async () => {
+    const runPanelCacheTest = async ({ label, runningText, button, test }) => {
         saveDirectSettings();
 
         if (!directBaseUrlInput.value || !directApiKeyInput.value || !directModelInput.value) {
             directStatusElement.textContent = 'Base URL, API Key, and Model are required.';
-            log('warn', 'Browser direct test skipped because required fields are missing.');
+            log('warn', `${label} skipped because required fields are missing.`);
             return;
         }
 
+        tavernBackendTestButton.disabled = true;
         directTestButton.disabled = true;
-        directStatusElement.textContent = 'Sending two browser direct requests...';
-        log('info', 'Starting browser direct cache test.');
+        directStatusElement.textContent = runningText;
+        log('info', `Starting ${label}.`);
 
         try {
-            lastDirectTestReport = await runDirectCacheTest({
+            lastDirectTestReport = await test({
                 baseUrl: directBaseUrlInput.value,
                 apiKey: directApiKeyInput.value,
                 model: directModelInput.value,
@@ -733,18 +877,35 @@ function createSettingsPanel() {
                 formatUsageLine('Second', lastDirectTestReport.second),
             ];
             directStatusElement.textContent = `${lastDirectTestReport.verdict.likelyCacheHit ? 'Likely cache hit.' : 'No clear cache hit.'} ${lines.join(' | ')}`;
-            log('info', 'Browser direct cache test finished.', {
+            log('info', `${label} finished.`, {
+                transport: lastDirectTestReport.transport,
                 verdict: lastDirectTestReport.verdict,
                 first: lastDirectTestReport.first?.usage,
                 second: lastDirectTestReport.second?.usage,
             });
         } catch (error) {
-            directStatusElement.textContent = `Direct test failed: ${error.message}`;
-            log('error', 'Browser direct cache test failed.', { message: error.message, name: error.name });
+            directStatusElement.textContent = `${label} failed: ${error.message}`;
+            log('error', `${label} failed.`, { message: error.message, name: error.name });
         } finally {
+            button.disabled = false;
+            tavernBackendTestButton.disabled = false;
             directTestButton.disabled = false;
         }
-    });
+    };
+
+    tavernBackendTestButton.addEventListener('click', () => runPanelCacheTest({
+        label: 'Tavern backend cache test',
+        runningText: 'Sending two requests through SillyTavern backend...',
+        button: tavernBackendTestButton,
+        test: runTavernBackendCacheTest,
+    }));
+
+    directTestButton.addEventListener('click', () => runPanelCacheTest({
+        label: 'Browser direct cache test',
+        runningText: 'Sending two browser direct requests...',
+        button: directTestButton,
+        test: runDirectCacheTest,
+    }));
 
     exportDirectButton.addEventListener('click', exportDirectTestReport);
     exportPromptButton.addEventListener('click', exportPromptSnapshot);
