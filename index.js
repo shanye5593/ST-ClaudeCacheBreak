@@ -178,6 +178,30 @@ function addCacheControlToMessage(message) {
     return true;
 }
 
+function summarizeCacheTarget(message, index) {
+    const content = message?.content;
+    const contentType = Array.isArray(content) ? 'array' : typeof content;
+    const blocks = Array.isArray(content) ? content : [];
+    const textBlocks = blocks.filter(isTextBlock);
+    const cachedTextBlocks = textBlocks.filter((block) => Boolean(block.cache_control));
+    const cachedBlock = cachedTextBlocks[cachedTextBlocks.length - 1] || null;
+    const text = cachedBlock?.text || '';
+
+    return {
+        index,
+        role: message?.role,
+        contentType,
+        blockCount: blocks.length,
+        textBlockCount: textBlocks.length,
+        cachedTextBlockCount: cachedTextBlocks.length,
+        hasCacheControl: cachedTextBlocks.length > 0,
+        cacheControl: cachedBlock?.cache_control || null,
+        cachedTextLength: text.length,
+        cachedTextPreview: text.slice(0, 160),
+        pioneerShapeOk: Array.isArray(content) && cachedTextBlocks.length > 0,
+    };
+}
+
 function isChatCompletion() {
     return main_api === 'openai';
 }
@@ -293,6 +317,7 @@ function applyCacheBreaks(messages) {
     let removed = 0;
     let changedMessages = 0;
     const modifiedMessages = [];
+    const cacheDiagnostics = [];
     const indexesToRemove = [];
 
     for (let index = 0; index < messages.length; index++) {
@@ -310,6 +335,7 @@ function applyCacheBreaks(messages) {
                 injected++;
                 remainingBreakpoints--;
                 modifiedMessages.push({ index, role: message.role, source: 'standalone-marker', appliedTo: targetIndex });
+                cacheDiagnostics.push(summarizeCacheTarget(messages[targetIndex], targetIndex));
             } else {
                 modifiedMessages.push({ index, role: message.role, source: 'standalone-marker', appliedTo: null });
             }
@@ -331,6 +357,10 @@ function applyCacheBreaks(messages) {
                 remainingBreakpoints -= result.injected;
                 changedMessages++;
                 modifiedMessages.push({ index, role: message.role, source: 'string' });
+
+                if (result.injected > 0) {
+                    cacheDiagnostics.push(summarizeCacheTarget(message, index));
+                }
             }
 
             continue;
@@ -346,6 +376,10 @@ function applyCacheBreaks(messages) {
                 remainingBreakpoints -= result.injected;
                 changedMessages++;
                 modifiedMessages.push({ index, role: message.role, source: 'content-array' });
+
+                if (result.injected > 0) {
+                    cacheDiagnostics.push(summarizeCacheTarget(message, index));
+                }
             }
         }
     }
@@ -363,6 +397,7 @@ function applyCacheBreaks(messages) {
         removed,
         changedMessages,
         modifiedMessages,
+        cacheDiagnostics,
         overflowRemoved,
     };
 }
