@@ -193,14 +193,34 @@ function addCacheControlToMessage(message) {
     return true;
 }
 
-function summarizeCacheTarget(message, index) {
+function getMessageTextLength(message) {
+    const content = message?.content;
+
+    if (typeof content === 'string') {
+        return content.length;
+    }
+
+    if (!Array.isArray(content)) {
+        return 0;
+    }
+
+    return content.reduce((total, block) => total + (isTextBlock(block) ? block.text.length : 0), 0);
+}
+
+function summarizeCacheTarget(messages, index) {
+    const message = messages[index];
     const content = message?.content;
     const contentType = Array.isArray(content) ? 'array' : typeof content;
     const blocks = Array.isArray(content) ? content : [];
     const textBlocks = blocks.filter(isTextBlock);
-    const cachedTextBlocks = textBlocks.filter((block) => Boolean(block.cache_control));
-    const cachedBlock = cachedTextBlocks[cachedTextBlocks.length - 1] || null;
+    const cachedBlockIndex = blocks.findIndex((block) => isTextBlock(block) && block.cache_control);
+    const cachedBlock = cachedBlockIndex >= 0 ? blocks[cachedBlockIndex] : null;
     const text = cachedBlock?.text || '';
+    const prefixMessages = messages.slice(0, index);
+    const prefixMessageTextLength = prefixMessages.reduce((total, item) => total + getMessageTextLength(item), 0);
+    const targetPrefixTextLength = cachedBlockIndex >= 0
+        ? blocks.slice(0, cachedBlockIndex + 1).reduce((total, block) => total + (isTextBlock(block) ? block.text.length : 0), 0)
+        : 0;
 
     return {
         index,
@@ -208,12 +228,16 @@ function summarizeCacheTarget(message, index) {
         contentType,
         blockCount: blocks.length,
         textBlockCount: textBlocks.length,
-        cachedTextBlockCount: cachedTextBlocks.length,
-        hasCacheControl: cachedTextBlocks.length > 0,
+        cachedBlockIndex,
+        hasCacheControl: Boolean(cachedBlock),
         cacheControl: cachedBlock?.cache_control || null,
-        cachedTextLength: text.length,
-        cachedTextPreview: text.slice(0, 160),
-        pioneerShapeOk: Array.isArray(content) && cachedTextBlocks.length > 0,
+        cachedBlockTextLength: text.length,
+        cachedBlockTextPreview: text.slice(0, 160),
+        prefixMessageCount: prefixMessages.length,
+        prefixMessageTextLength,
+        targetPrefixTextLength,
+        estimatedCachePrefixTextLength: prefixMessageTextLength + targetPrefixTextLength,
+        pioneerShapeOk: Array.isArray(content) && Boolean(cachedBlock),
     };
 }
 
@@ -350,7 +374,7 @@ function applyCacheBreaks(messages) {
                 injected++;
                 remainingBreakpoints--;
                 modifiedMessages.push({ index, role: message.role, source: 'standalone-marker', appliedTo: targetIndex });
-                cacheDiagnostics.push(summarizeCacheTarget(messages[targetIndex], targetIndex));
+                cacheDiagnostics.push(summarizeCacheTarget(messages, targetIndex));
             } else {
                 modifiedMessages.push({ index, role: message.role, source: 'standalone-marker', appliedTo: null });
             }
@@ -374,7 +398,7 @@ function applyCacheBreaks(messages) {
                 modifiedMessages.push({ index, role: message.role, source: 'string' });
 
                 if (result.injected > 0) {
-                    cacheDiagnostics.push(summarizeCacheTarget(message, index));
+                    cacheDiagnostics.push(summarizeCacheTarget(messages, index));
                 }
             }
 
@@ -393,7 +417,7 @@ function applyCacheBreaks(messages) {
                 modifiedMessages.push({ index, role: message.role, source: 'content-array' });
 
                 if (result.injected > 0) {
-                    cacheDiagnostics.push(summarizeCacheTarget(message, index));
+                    cacheDiagnostics.push(summarizeCacheTarget(messages, index));
                 }
             }
         }
