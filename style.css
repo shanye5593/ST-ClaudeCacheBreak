@@ -57,6 +57,11 @@
     gap: 8px;
 }
 
+.claude-cache-break-input-generate {
+    margin-right: 4px;
+    white-space: nowrap;
+}
+
 .claude-cache-break-log {
     min-height: 120px;
     max-height: 240px;

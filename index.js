@@ -24,6 +24,7 @@ let lastDirectTestReport = null;
 let lastGeneratedText = '';
 let csrfTokenCache = null;
 let pendingCachedGenerate = false;
+let inputGenerateButton = null;
 
 function loadSettings() {
     try {
@@ -831,6 +832,36 @@ function insertTextToInput(text) {
     return { ok: true };
 }
 
+function setInputGenerateButtonDisabled(disabled) {
+    if (inputGenerateButton) {
+        inputGenerateButton.disabled = disabled;
+    }
+}
+
+function setAllGenerateButtonsDisabled(disabled) {
+    setInputGenerateButtonDisabled(disabled);
+
+    for (const selector of [
+        '#claude_cache_break_generate_char',
+        '#claude_cache_break_generate_narrator',
+        '#claude_cache_break_insert_input',
+        '#claude_cache_break_tavern_backend_test',
+        '#claude_cache_break_direct_test',
+    ]) {
+        const button = document.querySelector(selector);
+
+        if (button) {
+            button.disabled = disabled;
+        }
+    }
+}
+
+function setDirectStatus(text) {
+    if (testStatusElement) {
+        testStatusElement.textContent = text;
+    }
+}
+
 function getPanelApiKey() {
     return document.querySelector('#claude_cache_break_direct_api_key')?.value || '';
 }
@@ -875,6 +906,93 @@ async function runTavernBackendGenerate({ baseUrl, apiKey, model, maxTokens, tem
         response: result,
         text,
     };
+}
+
+async function runCachedGenerate(identity = 'char') {
+    const config = getGenerationConfig();
+
+    if (!isGenerationConfigReady(config)) {
+        setDirectStatus('Base URL, API Key, and Model are required. Open the Claude Cache Break panel once and fill them in.');
+        log('warn', 'Generate skipped because required fields are missing.');
+        return;
+    }
+
+    setAllGenerateButtonsDisabled(true);
+    setDirectStatus('Building prompt with SillyTavern dry run...');
+    log('info', 'Starting cached generate.', { identity });
+
+    try {
+        lastPromptSnapshot = null;
+        pendingCachedGenerate = true;
+        await Generate('normal', {}, true);
+        pendingCachedGenerate = false;
+
+        if (!lastPromptSnapshot?.chat?.length) {
+            throw new Error('Dry run did not produce a prompt snapshot.');
+        }
+
+        setDirectStatus(`Generating via SillyTavern backend as ${identity}...`);
+        const result = await runTavernBackendGenerate(config);
+        const injectResult = injectTextToChat(result.text, identity);
+
+        if (!injectResult.ok) {
+            throw new Error(`Injection failed: ${injectResult.reason || injectResult.error || 'unknown'}`);
+        }
+
+        lastDirectTestReport = result;
+        setDirectStatus(`Generated and injected as ${identity}. ${formatUsageLine('Usage', result.response)}`);
+        log('info', 'Cached generated and injected reply.', {
+            identity,
+            messageIndex: injectResult.messageIndex,
+            usage: result.response?.usage,
+            textLength: result.text.length,
+        });
+    } catch (error) {
+        setDirectStatus(`Generate failed: ${error.message}`);
+        log('error', 'Generate failed.', { message: error.message, name: error.name });
+    } finally {
+        pendingCachedGenerate = false;
+        setAllGenerateButtonsDisabled(false);
+    }
+}
+
+function createInputGenerateButton() {
+    const existingButton = document.querySelector('#claude_cache_break_input_generate');
+
+    if (existingButton) {
+        inputGenerateButton = existingButton;
+        return;
+    }
+
+    const sendButton = document.querySelector('#send_but');
+    const textarea = document.querySelector('#send_textarea');
+    const anchor = sendButton || textarea;
+
+    if (!anchor) {
+        log('warn', 'Could not find the send area; input generate button was not added.');
+        return;
+    }
+
+    const button = document.createElement('button');
+    button.id = 'claude_cache_break_input_generate';
+    button.type = 'button';
+    button.className = 'menu_button claude-cache-break-input-generate';
+    button.title = 'Claude Cache Break cached generate';
+    button.textContent = '⚡ Cache';
+    button.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void runCachedGenerate('char');
+    });
+
+    if (sendButton?.parentElement) {
+        sendButton.parentElement.insertBefore(button, sendButton);
+    } else {
+        textarea.insertAdjacentElement('afterend', button);
+    }
+
+    inputGenerateButton = button;
+    log('info', 'Input generate button ready.');
 }
 
 function createSettingsPanel() {
@@ -1002,13 +1120,7 @@ function createSettingsPanel() {
     directMaxTokensInput.addEventListener('input', saveDirectSettings);
     directTemperatureInput.addEventListener('input', saveDirectSettings);
 
-    const setActionButtonsDisabled = (disabled) => {
-        generateCharButton.disabled = disabled;
-        generateNarratorButton.disabled = disabled;
-        insertInputButton.disabled = disabled;
-        tavernBackendTestButton.disabled = disabled;
-        directTestButton.disabled = disabled;
-    };
+    const setActionButtonsDisabled = setAllGenerateButtonsDisabled;
 
     const runPanelCacheTest = async ({ label, runningText, test }) => {
         saveDirectSettings();
@@ -1053,52 +1165,7 @@ function createSettingsPanel() {
 
     const runPanelGenerate = async (identity) => {
         saveDirectSettings();
-
-        const config = getGenerationConfig();
-
-        if (!isGenerationConfigReady(config)) {
-            directStatusElement.textContent = 'Base URL, API Key, and Model are required.';
-            log('warn', 'Generate skipped because required fields are missing.');
-            return;
-        }
-
-        setActionButtonsDisabled(true);
-        directStatusElement.textContent = `Building prompt with SillyTavern dry run...`;
-        log('info', 'Starting cached generate.', { identity });
-
-        try {
-            lastPromptSnapshot = null;
-            pendingCachedGenerate = true;
-            await Generate('normal', {}, true);
-            pendingCachedGenerate = false;
-
-            if (!lastPromptSnapshot?.chat?.length) {
-                throw new Error('Dry run did not produce a prompt snapshot.');
-            }
-
-            directStatusElement.textContent = `Generating via SillyTavern backend as ${identity}...`;
-            const result = await runTavernBackendGenerate(config);
-            const injectResult = injectTextToChat(result.text, identity);
-
-            if (!injectResult.ok) {
-                throw new Error(`Injection failed: ${injectResult.reason || injectResult.error || 'unknown'}`);
-            }
-
-            lastDirectTestReport = result;
-            directStatusElement.textContent = `Generated and injected as ${identity}. ${formatUsageLine('Usage', result.response)}`;
-            log('info', 'Cached generated and injected reply.', {
-                identity,
-                messageIndex: injectResult.messageIndex,
-                usage: result.response?.usage,
-                textLength: result.text.length,
-            });
-        } catch (error) {
-            directStatusElement.textContent = `Generate failed: ${error.message}`;
-            log('error', 'Generate failed.', { message: error.message, name: error.name });
-        } finally {
-            pendingCachedGenerate = false;
-            setActionButtonsDisabled(false);
-        }
+        await runCachedGenerate(identity);
     };
 
     generateCharButton.addEventListener('click', () => runPanelGenerate('char'));
@@ -1184,11 +1251,18 @@ eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, async (data) => {
 });
 
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', createSettingsPanel);
+    document.addEventListener('DOMContentLoaded', () => {
+        createSettingsPanel();
+        createInputGenerateButton();
+    });
 } else {
     createSettingsPanel();
+    createInputGenerateButton();
 }
 
-eventSource.on(event_types.APP_READY, createSettingsPanel);
+eventSource.on(event_types.APP_READY, () => {
+    createSettingsPanel();
+    createInputGenerateButton();
+});
 
 log('info', 'Loaded.');
