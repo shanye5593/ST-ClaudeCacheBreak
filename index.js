@@ -1,4 +1,4 @@
-import { eventSource, event_types, main_api } from '../../../../script.js';
+import { eventSource, event_types, Generate, main_api } from '../../../../script.js';
 
 const MARKER = '[[CACHE_BREAK]]';
 const MAX_BREAKPOINTS = 4;
@@ -9,7 +9,6 @@ const MAX_LOG_ENTRIES = 100;
 const defaultSettings = {
     enabled: true,
     debug: true,
-    autoGenerate: false,
     directBaseUrl: '',
     directModel: '',
     directMaxTokens: '512',
@@ -24,6 +23,7 @@ let lastPromptSnapshot = null;
 let lastDirectTestReport = null;
 let lastGeneratedText = '';
 let csrfTokenCache = null;
+let pendingCachedGenerate = false;
 
 function loadSettings() {
     try {
@@ -877,38 +877,6 @@ async function runTavernBackendGenerate({ baseUrl, apiKey, model, maxTokens, tem
     };
 }
 
-async function autoGenerateAndInject() {
-    const config = getGenerationConfig();
-
-    if (!isGenerationConfigReady(config)) {
-        throw new Error('Auto generate is enabled, but Base URL, API Key, or Model is missing in the plugin panel.');
-    }
-
-    if (testStatusElement) {
-        testStatusElement.textContent = 'Auto generating via SillyTavern backend...';
-    }
-
-    log('info', 'Auto generation started.');
-    const result = await runTavernBackendGenerate(config);
-    const injectResult = injectTextToChat(result.text, 'char');
-
-    if (!injectResult.ok) {
-        throw new Error(`Injection failed: ${injectResult.reason || injectResult.error || 'unknown'}`);
-    }
-
-    lastDirectTestReport = result;
-
-    if (testStatusElement) {
-        testStatusElement.textContent = `Auto generated and injected as character. ${formatUsageLine('Usage', result.response)}`;
-    }
-
-    log('info', 'Auto generated and injected reply.', {
-        messageIndex: injectResult.messageIndex,
-        usage: result.response?.usage,
-        textLength: result.text.length,
-    });
-}
-
 function createSettingsPanel() {
     if (document.getElementById('claude_cache_break_panel')) {
         return;
@@ -936,10 +904,6 @@ function createSettingsPanel() {
             <input id="claude_cache_break_debug" type="checkbox">
             <span>Mirror logs to browser console</span>
         </label>
-        <label class="checkbox_label claude-cache-break-row">
-            <input id="claude_cache_break_auto_generate" type="checkbox">
-            <span>Auto generate via Tavern backend and inject as character</span>
-        </label>
         <div class="claude-cache-break-direct">
             <div class="claude-cache-break-subtitle">Plugin generation and cache tests</div>
             <label class="claude-cache-break-field">
@@ -965,8 +929,8 @@ function createSettingsPanel() {
                 </label>
             </div>
             <div class="claude-cache-break-actions">
-                <button id="claude_cache_break_generate_char" class="menu_button">Generate as character</button>
-                <button id="claude_cache_break_generate_narrator" class="menu_button">Generate as narrator</button>
+                <button id="claude_cache_break_generate_char" class="menu_button">Cached generate as character</button>
+                <button id="claude_cache_break_generate_narrator" class="menu_button">Cached generate as narrator</button>
                 <button id="claude_cache_break_insert_input" class="menu_button">Insert last reply to input</button>
             </div>
             <div class="claude-cache-break-actions">
@@ -988,7 +952,6 @@ function createSettingsPanel() {
 
     const enabledInput = panel.querySelector('#claude_cache_break_enabled');
     const debugInput = panel.querySelector('#claude_cache_break_debug');
-    const autoGenerateInput = panel.querySelector('#claude_cache_break_auto_generate');
     const directBaseUrlInput = panel.querySelector('#claude_cache_break_direct_base_url');
     const directApiKeyInput = panel.querySelector('#claude_cache_break_direct_api_key');
     const directModelInput = panel.querySelector('#claude_cache_break_direct_model');
@@ -1009,7 +972,6 @@ function createSettingsPanel() {
 
     enabledInput.checked = settings.enabled;
     debugInput.checked = settings.debug;
-    autoGenerateInput.checked = settings.autoGenerate;
     directBaseUrlInput.value = settings.directBaseUrl;
     directModelInput.value = settings.directModel;
     directMaxTokensInput.value = settings.directMaxTokens;
@@ -1025,12 +987,6 @@ function createSettingsPanel() {
         settings.debug = debugInput.checked;
         saveSettings();
         log('info', `Console logging ${settings.debug ? 'enabled' : 'disabled'}.`);
-    });
-
-    autoGenerateInput.addEventListener('change', () => {
-        settings.autoGenerate = autoGenerateInput.checked;
-        saveSettings();
-        log('info', `Auto generate ${settings.autoGenerate ? 'enabled' : 'disabled'}.`);
     });
 
     const saveDirectSettings = () => {
@@ -1107,10 +1063,20 @@ function createSettingsPanel() {
         }
 
         setActionButtonsDisabled(true);
-        directStatusElement.textContent = `Generating via SillyTavern backend as ${identity}...`;
-        log('info', 'Starting Tavern backend generate.', { identity });
+        directStatusElement.textContent = `Building prompt with SillyTavern dry run...`;
+        log('info', 'Starting cached generate.', { identity });
 
         try {
+            lastPromptSnapshot = null;
+            pendingCachedGenerate = true;
+            await Generate('normal', {}, true);
+            pendingCachedGenerate = false;
+
+            if (!lastPromptSnapshot?.chat?.length) {
+                throw new Error('Dry run did not produce a prompt snapshot.');
+            }
+
+            directStatusElement.textContent = `Generating via SillyTavern backend as ${identity}...`;
             const result = await runTavernBackendGenerate(config);
             const injectResult = injectTextToChat(result.text, identity);
 
@@ -1120,7 +1086,7 @@ function createSettingsPanel() {
 
             lastDirectTestReport = result;
             directStatusElement.textContent = `Generated and injected as ${identity}. ${formatUsageLine('Usage', result.response)}`;
-            log('info', 'Generated and injected reply.', {
+            log('info', 'Cached generated and injected reply.', {
                 identity,
                 messageIndex: injectResult.messageIndex,
                 usage: result.response?.usage,
@@ -1130,6 +1096,7 @@ function createSettingsPanel() {
             directStatusElement.textContent = `Generate failed: ${error.message}`;
             log('error', 'Generate failed.', { message: error.message, name: error.name });
         } finally {
+            pendingCachedGenerate = false;
             setActionButtonsDisabled(false);
         }
     };
@@ -1173,7 +1140,7 @@ function createSettingsPanel() {
 }
 
 eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, async (data) => {
-    if (data?.dryRun) {
+    if (data?.dryRun && !pendingCachedGenerate) {
         log('info', 'Skipped dry run.');
         return;
     }
@@ -1211,21 +1178,8 @@ eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, async (data) => {
         log('info', 'No cache break markers found.', { messages: data.chat.length });
     }
 
-    if (settings.autoGenerate) {
-        const config = getGenerationConfig();
-
-        if (!isGenerationConfigReady(config)) {
-            log('warn', 'Auto generate is enabled but required panel fields are missing; original request will continue.');
-            return;
-        }
-
-        try {
-            await autoGenerateAndInject();
-        } catch (error) {
-            log('error', 'Auto generate failed; original request was stopped to avoid possible double billing.', { message: error.message, name: error.name });
-        }
-
-        throw new Error('Claude Cache Break handled generation via Tavern backend; original request stopped.');
+    if (pendingCachedGenerate) {
+        log('info', 'Captured dry-run prompt for cached generate.', { messages: data.chat.length });
     }
 });
 

@@ -47,13 +47,12 @@ The panel includes:
 The experimental generation and cache tools use the latest converted prompt snapshot and SillyTavern's own `/api/backends/chat-completions/generate` forwarding endpoint, avoiding browser CORS while still being plugin-driven.
 
 1. Enter Base URL, API Key, Model, and token options in the extension panel.
-2. Trigger one normal SillyTavern generation so the extension captures a converted prompt snapshot.
-3. Click **Generate as character** to make one non-streaming Tavern-backend request and inject the reply as a character message.
-4. Click **Generate as narrator** to inject the reply as a narrator/system message instead.
-5. Click **Tavern backend test x2** to send the same converted prompt twice and report cache usage fields.
-6. If needed, click **Browser direct test x2** as a fallback diagnostic. Browser direct calls may fail if the endpoint does not allow CORS.
+2. Click **Cached generate as character** to ask SillyTavern for a dry-run prompt, send that prompt through the Tavern backend forwarding endpoint, and inject the non-streaming reply as a character message.
+3. Click **Cached generate as narrator** to inject the reply as a narrator/system message instead.
+4. Click **Tavern backend test x2** after any captured prompt to send the same converted prompt twice and report cache usage fields.
+5. If needed, click **Browser direct test x2** as a fallback diagnostic. Browser direct calls may fail if the endpoint does not allow CORS.
 
-The **Auto generate via Tavern backend and inject as character** option attempts to handle normal SillyTavern generation automatically: after the prompt is prepared, the extension calls the Tavern backend forwarding endpoint, injects the reply as a character message, and stops the original request to avoid double billing. Leave it off while configuring or testing.
+The cached generate buttons use SillyTavern's dry-run prompt builder, so they do not intentionally start the original main API request.
 
 The API key is only kept in the current page session and is not saved to localStorage.
 
