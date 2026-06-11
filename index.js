@@ -49,17 +49,32 @@ function log(level, message, details = null) {
     renderLogs();
 }
 
+function formatLogEntries() {
+    return logEntries.map((entry) => {
+        const details = entry.details ? ` ${JSON.stringify(entry.details)}` : '';
+        return `[${entry.time}] ${entry.level.toUpperCase()} ${entry.message}${details}`;
+    }).join('\n');
+}
+
 function renderLogs() {
     if (!logElement) {
         return;
     }
 
-    logElement.textContent = logEntries.map((entry) => {
-        const details = entry.details ? ` ${JSON.stringify(entry.details)}` : '';
-        return `[${entry.time}] ${entry.level.toUpperCase()} ${entry.message}${details}`;
-    }).join('\n');
-
+    logElement.textContent = formatLogEntries();
     logElement.scrollTop = logElement.scrollHeight;
+}
+
+function exportLogs() {
+    const blob = new Blob([formatLogEntries()], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+    link.href = url;
+    link.download = `claude-cache-break-${timestamp}.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
 }
 
 function isTextBlock(block) {
@@ -430,6 +445,7 @@ function createSettingsPanel() {
             <span>Mirror logs to browser console</span>
         </label>
         <div class="claude-cache-break-actions">
+            <button id="claude_cache_break_export_log" class="menu_button">Export log txt</button>
             <button id="claude_cache_break_clear_log" class="menu_button">Clear log</button>
         </div>
         <pre id="claude_cache_break_log" class="claude-cache-break-log"></pre>
@@ -439,6 +455,7 @@ function createSettingsPanel() {
 
     const enabledInput = panel.querySelector('#claude_cache_break_enabled');
     const debugInput = panel.querySelector('#claude_cache_break_debug');
+    const exportButton = panel.querySelector('#claude_cache_break_export_log');
     const clearButton = panel.querySelector('#claude_cache_break_clear_log');
     logElement = panel.querySelector('#claude_cache_break_log');
 
@@ -456,6 +473,8 @@ function createSettingsPanel() {
         saveSettings();
         log('info', `Console logging ${settings.debug ? 'enabled' : 'disabled'}.`);
     });
+
+    exportButton.addEventListener('click', exportLogs);
 
     clearButton.addEventListener('click', () => {
         logEntries = [];
