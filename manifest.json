@@ -1,0 +1,12 @@
+{
+    "display_name": "Claude Cache Break",
+    "loading_order": 5,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "shanye5593",
+    "version": "0.1.0",
+    "homePage": "https://github.com/shanye5593/ST-ClaudeCacheBreak",
+    "auto_update": true
+}
