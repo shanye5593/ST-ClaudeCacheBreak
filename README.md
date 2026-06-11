@@ -19,7 +19,7 @@ Stable character/world/system instructions...
 Dynamic chat or user-specific content...
 ```
 
-The marker is removed before the request is sent. The text block before the marker receives:
+The marker is removed before the request is sent. When the marker is its own prompt entry, the stable entries before it are merged into one text content block with:
 
 ```json
 {

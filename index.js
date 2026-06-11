@@ -151,61 +151,66 @@ function countMarkersInContent(content) {
     return content.reduce((total, block) => total + (isTextBlock(block) ? countMarkers(block.text) : 0), 0);
 }
 
-function findLastTextBlock(content) {
+function getTextContent(content) {
+    if (typeof content === 'string') {
+        return content;
+    }
+
     if (!Array.isArray(content)) {
         return null;
     }
 
-    for (let index = content.length - 1; index >= 0; index--) {
-        const block = content[index];
-
-        if (isTextBlock(block) && block.text.trim()) {
-            return block;
-        }
+    if (!content.every(isTextBlock)) {
+        return null;
     }
 
-    return null;
+    return content.map((block) => block.text).join('');
 }
 
-function canAddCacheControlToMessage(message) {
-    if (typeof message?.content === 'string') {
-        return message.content.trim() !== '';
-    }
+function findStandaloneMarkerMergeRange(messages, markerIndex) {
+    const markerRole = messages[markerIndex]?.role;
+    let startIndex = markerIndex;
 
-    const block = findLastTextBlock(message?.content);
-    return Boolean(block && !block.cache_control);
-}
-
-function findPreviousCacheTarget(messages, markerIndex) {
     for (let index = markerIndex - 1; index >= 0; index--) {
         const message = messages[index];
+        const text = getTextContent(message?.content);
 
-        if (!isMarkerOnlyContent(message?.content) && canAddCacheControlToMessage(message)) {
-            return index;
+        if (message?.role !== markerRole || isMarkerOnlyContent(message?.content) || text === null || !text.trim()) {
+            break;
         }
+
+        startIndex = index;
     }
 
-    return -1;
+    return startIndex < markerIndex ? { startIndex, endIndex: markerIndex - 1 } : null;
 }
 
-function addCacheControlToMessage(message) {
-    if (typeof message?.content === 'string') {
-        message.content = [{
+function mergeStandaloneMarkerPrefix(messages, markerIndex) {
+    const range = findStandaloneMarkerMergeRange(messages, markerIndex);
+
+    if (!range) {
+        return null;
+    }
+
+    const mergedText = messages
+        .slice(range.startIndex, range.endIndex + 1)
+        .map((message) => getTextContent(message.content))
+        .join('\n');
+
+    messages.splice(range.startIndex, markerIndex - range.startIndex + 1, {
+        role: messages[range.startIndex].role,
+        content: [{
             type: 'text',
-            text: message.content,
+            text: mergedText,
             cache_control: { type: 'ephemeral' },
-        }];
-        return true;
-    }
+        }],
+    });
 
-    const block = findLastTextBlock(message?.content);
-
-    if (!block || block.cache_control) {
-        return false;
-    }
-
-    block.cache_control = { type: 'ephemeral' };
-    return true;
+    return {
+        targetIndex: range.startIndex,
+        mergedMessageCount: range.endIndex - range.startIndex + 1,
+        cachedBlockTextLength: mergedText.length,
+    };
 }
 
 function getMessageTextLength(message) {
@@ -379,18 +384,25 @@ function applyCacheBreaks(messages) {
 
         if (remainingBreakpoints > 0 && isMarkerOnlyContent(message?.content)) {
             const markerCount = countMarkersInContent(message.content);
-            const targetIndex = findPreviousCacheTarget(messages, index);
+            const mergeResult = mergeStandaloneMarkerPrefix(messages, index);
 
             removed += markerCount;
             changedMessages++;
-            indexesToRemove.push(index);
 
-            if (targetIndex >= 0 && addCacheControlToMessage(messages[targetIndex])) {
+            if (mergeResult) {
                 injected++;
                 remainingBreakpoints--;
-                modifiedMessages.push({ index, role: message.role, source: 'standalone-marker', appliedTo: targetIndex });
-                cacheDiagnostics.push(summarizeCacheTarget(messages, targetIndex));
+                modifiedMessages.push({
+                    index,
+                    role: message.role,
+                    source: 'merged-standalone-marker',
+                    appliedTo: mergeResult.targetIndex,
+                    mergedMessageCount: mergeResult.mergedMessageCount,
+                    cachedBlockTextLength: mergeResult.cachedBlockTextLength,
+                });
+                cacheDiagnostics.push(summarizeCacheTarget(messages, mergeResult.targetIndex));
             } else {
+                indexesToRemove.push(index);
                 modifiedMessages.push({ index, role: message.role, source: 'standalone-marker', appliedTo: null });
             }
 
