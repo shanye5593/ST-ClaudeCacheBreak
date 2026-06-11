@@ -37,8 +37,21 @@ The panel includes:
 
 - Enable marker conversion
 - Mirror logs to browser console
-- Clear log
+- Export converted prompt JSON
+- Export log txt
+- Experimental browser direct cache test using the latest converted prompt snapshot
 - A live log showing trigger status, skipped reasons, marker counts, injected breakpoints, and changed messages
+
+## Browser direct cache test
+
+The experimental direct test sends the latest converted prompt snapshot from the browser to your OpenAI-compatible endpoint twice, then reports cache usage fields. It is intended for local diagnosis only.
+
+1. Trigger one normal SillyTavern generation so the extension captures a converted prompt snapshot.
+2. Enter Base URL, API Key, Model, and token options in the extension panel.
+3. Click **Direct test x2**.
+4. Check the status line or export the direct report JSON.
+
+The API key is only kept in the current page session and is not saved to localStorage. Browser direct calls may fail if the endpoint does not allow CORS.
 
 ## Notes
 

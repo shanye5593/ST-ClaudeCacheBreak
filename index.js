@@ -9,12 +9,17 @@ const MAX_LOG_ENTRIES = 100;
 const defaultSettings = {
     enabled: true,
     debug: true,
+    directBaseUrl: '',
+    directModel: '',
+    directMaxTokens: '512',
+    directTemperature: '',
 };
 
 let settings = loadSettings();
 let logEntries = [];
 let logElement = null;
 let lastPromptSnapshot = null;
+let lastDirectTestReport = null;
 
 function loadSettings() {
     try {
@@ -90,6 +95,55 @@ function exportPromptSnapshot() {
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     downloadFile(JSON.stringify(lastPromptSnapshot, null, 2), `claude-cache-break-prompt-${timestamp}.json`, 'application/json;charset=utf-8');
+}
+
+function exportDirectTestReport() {
+    if (!lastDirectTestReport) {
+        log('warn', 'No browser direct test report is available yet.');
+        return;
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    downloadFile(JSON.stringify(lastDirectTestReport, null, 2), `claude-cache-break-direct-test-${timestamp}.json`, 'application/json;charset=utf-8');
+}
+
+function normalizeBaseUrl(baseUrl) {
+    return baseUrl.trim().replace(/\/+$/, '');
+}
+
+function getApiRoot(baseUrl) {
+    return normalizeBaseUrl(baseUrl)
+        .replace(/\/v1\/chat\/completions$/i, '')
+        .replace(/\/v1\/models$/i, '')
+        .replace(/\/v1$/i, '');
+}
+
+function buildApiUrl(baseUrl, path) {
+    return `${getApiRoot(baseUrl)}${path}`;
+}
+
+function extractUsage(responseJson) {
+    const usage = responseJson?.usage || {};
+    const promptTokensDetails = usage.prompt_tokens_details || {};
+
+    return {
+        cachedTokens: promptTokensDetails.cached_tokens ?? null,
+        cacheReadTokens: usage.cache_read_tokens ?? responseJson?.cache_read_tokens ?? null,
+        cacheWriteTokens: promptTokensDetails.cache_write_tokens ?? usage.cache_write_tokens ?? responseJson?.cache_write_tokens ?? null,
+        anthropicCacheReadInputTokens: usage.cache_read_input_tokens ?? null,
+        anthropicCacheCreationInputTokens: usage.cache_creation_input_tokens ?? null,
+        rawUsage: usage,
+    };
+}
+
+function formatUsageLine(label, result) {
+    const usage = result?.usage;
+
+    if (!usage) {
+        return `${label}: no usage`;
+    }
+
+    return `${label}: cached_tokens=${usage.cachedTokens ?? 'null'}, cache_read_tokens=${usage.cacheReadTokens ?? 'null'}, cache_write_tokens=${usage.cacheWriteTokens ?? 'null'}, anthropic_read=${usage.anthropicCacheReadInputTokens ?? 'null'}, anthropic_write=${usage.anthropicCacheCreationInputTokens ?? 'null'}, elapsed=${result.elapsedMs}ms`;
 }
 
 function isTextBlock(block) {
@@ -468,6 +522,76 @@ function applyCacheBreaks(messages) {
     };
 }
 
+async function sendDirectChatCompletion({ url, apiKey, body }) {
+    const startedAt = performance.now();
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    let json = null;
+
+    try {
+        json = JSON.parse(text);
+    } catch {
+        json = null;
+    }
+
+    return {
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        response: json ?? text,
+        usage: json ? extractUsage(json) : null,
+    };
+}
+
+async function runDirectCacheTest({ baseUrl, apiKey, model, maxTokens, temperature }) {
+    if (!lastPromptSnapshot?.chat?.length) {
+        throw new Error('No converted prompt snapshot is available yet. Trigger one SillyTavern generation first.');
+    }
+
+    const url = buildApiUrl(baseUrl, '/v1/chat/completions');
+    const requestBody = {
+        model,
+        messages: JSON.parse(JSON.stringify(lastPromptSnapshot.chat)),
+        max_tokens: Number(maxTokens) || 512,
+    };
+
+    if (temperature !== '' && temperature !== null && temperature !== undefined) {
+        requestBody.temperature = Number(temperature);
+    }
+
+    const first = await sendDirectChatCompletion({ url, apiKey, body: requestBody });
+    const second = await sendDirectChatCompletion({ url, apiKey, body: requestBody });
+
+    return {
+        exportedAt: new Date().toISOString(),
+        request: {
+            url,
+            body: requestBody,
+        },
+        promptSnapshot: lastPromptSnapshot,
+        first,
+        second,
+        verdict: {
+            secondCachedTokens: second.usage?.cachedTokens,
+            secondCacheReadTokens: second.usage?.cacheReadTokens,
+            secondAnthropicCacheReadInputTokens: second.usage?.anthropicCacheReadInputTokens,
+            likelyCacheHit: Boolean(
+                (second.usage?.cachedTokens ?? 0) > 0
+                || (second.usage?.cacheReadTokens ?? 0) > 0
+                || (second.usage?.anthropicCacheReadInputTokens ?? 0) > 0
+            ),
+        },
+    };
+}
+
 function createSettingsPanel() {
     if (document.getElementById('claude_cache_break_panel')) {
         return;
@@ -495,6 +619,36 @@ function createSettingsPanel() {
             <input id="claude_cache_break_debug" type="checkbox">
             <span>Mirror logs to browser console</span>
         </label>
+        <div class="claude-cache-break-direct">
+            <div class="claude-cache-break-subtitle">Browser direct cache test</div>
+            <label class="claude-cache-break-field">
+                <span>Base URL</span>
+                <input id="claude_cache_break_direct_base_url" class="text_pole" type="text" placeholder="https://api.pioneer.ai or https://api.pioneer.ai/v1">
+            </label>
+            <label class="claude-cache-break-field">
+                <span>API Key</span>
+                <input id="claude_cache_break_direct_api_key" class="text_pole" type="password" placeholder="Only kept in this page session">
+            </label>
+            <label class="claude-cache-break-field">
+                <span>Model</span>
+                <input id="claude_cache_break_direct_model" class="text_pole" type="text" placeholder="claude-opus-4-6">
+            </label>
+            <div class="claude-cache-break-grid">
+                <label class="claude-cache-break-field">
+                    <span>Max tokens</span>
+                    <input id="claude_cache_break_direct_max_tokens" class="text_pole" type="number" min="1" step="1">
+                </label>
+                <label class="claude-cache-break-field">
+                    <span>Temperature</span>
+                    <input id="claude_cache_break_direct_temperature" class="text_pole" type="number" step="0.01" placeholder="optional">
+                </label>
+            </div>
+            <div class="claude-cache-break-actions">
+                <button id="claude_cache_break_direct_test" class="menu_button">Direct test x2</button>
+                <button id="claude_cache_break_export_direct" class="menu_button">Export direct report</button>
+            </div>
+            <div id="claude_cache_break_direct_status" class="claude-cache-break-status">Trigger one normal generation first, then test the latest converted prompt.</div>
+        </div>
         <div class="claude-cache-break-actions">
             <button id="claude_cache_break_export_prompt" class="menu_button">Export prompt JSON</button>
             <button id="claude_cache_break_export_log" class="menu_button">Export log txt</button>
@@ -507,6 +661,14 @@ function createSettingsPanel() {
 
     const enabledInput = panel.querySelector('#claude_cache_break_enabled');
     const debugInput = panel.querySelector('#claude_cache_break_debug');
+    const directBaseUrlInput = panel.querySelector('#claude_cache_break_direct_base_url');
+    const directApiKeyInput = panel.querySelector('#claude_cache_break_direct_api_key');
+    const directModelInput = panel.querySelector('#claude_cache_break_direct_model');
+    const directMaxTokensInput = panel.querySelector('#claude_cache_break_direct_max_tokens');
+    const directTemperatureInput = panel.querySelector('#claude_cache_break_direct_temperature');
+    const directTestButton = panel.querySelector('#claude_cache_break_direct_test');
+    const exportDirectButton = panel.querySelector('#claude_cache_break_export_direct');
+    const directStatusElement = panel.querySelector('#claude_cache_break_direct_status');
     const exportPromptButton = panel.querySelector('#claude_cache_break_export_prompt');
     const exportButton = panel.querySelector('#claude_cache_break_export_log');
     const clearButton = panel.querySelector('#claude_cache_break_clear_log');
@@ -514,6 +676,10 @@ function createSettingsPanel() {
 
     enabledInput.checked = settings.enabled;
     debugInput.checked = settings.debug;
+    directBaseUrlInput.value = settings.directBaseUrl;
+    directModelInput.value = settings.directModel;
+    directMaxTokensInput.value = settings.directMaxTokens;
+    directTemperatureInput.value = settings.directTemperature;
 
     enabledInput.addEventListener('change', () => {
         settings.enabled = enabledInput.checked;
@@ -527,6 +693,60 @@ function createSettingsPanel() {
         log('info', `Console logging ${settings.debug ? 'enabled' : 'disabled'}.`);
     });
 
+    const saveDirectSettings = () => {
+        settings.directBaseUrl = directBaseUrlInput.value;
+        settings.directModel = directModelInput.value;
+        settings.directMaxTokens = directMaxTokensInput.value;
+        settings.directTemperature = directTemperatureInput.value;
+        saveSettings();
+    };
+
+    directBaseUrlInput.addEventListener('input', saveDirectSettings);
+    directModelInput.addEventListener('input', saveDirectSettings);
+    directMaxTokensInput.addEventListener('input', saveDirectSettings);
+    directTemperatureInput.addEventListener('input', saveDirectSettings);
+
+    directTestButton.addEventListener('click', async () => {
+        saveDirectSettings();
+
+        if (!directBaseUrlInput.value || !directApiKeyInput.value || !directModelInput.value) {
+            directStatusElement.textContent = 'Base URL, API Key, and Model are required.';
+            log('warn', 'Browser direct test skipped because required fields are missing.');
+            return;
+        }
+
+        directTestButton.disabled = true;
+        directStatusElement.textContent = 'Sending two browser direct requests...';
+        log('info', 'Starting browser direct cache test.');
+
+        try {
+            lastDirectTestReport = await runDirectCacheTest({
+                baseUrl: directBaseUrlInput.value,
+                apiKey: directApiKeyInput.value,
+                model: directModelInput.value,
+                maxTokens: directMaxTokensInput.value,
+                temperature: directTemperatureInput.value,
+            });
+
+            const lines = [
+                formatUsageLine('First', lastDirectTestReport.first),
+                formatUsageLine('Second', lastDirectTestReport.second),
+            ];
+            directStatusElement.textContent = `${lastDirectTestReport.verdict.likelyCacheHit ? 'Likely cache hit.' : 'No clear cache hit.'} ${lines.join(' | ')}`;
+            log('info', 'Browser direct cache test finished.', {
+                verdict: lastDirectTestReport.verdict,
+                first: lastDirectTestReport.first?.usage,
+                second: lastDirectTestReport.second?.usage,
+            });
+        } catch (error) {
+            directStatusElement.textContent = `Direct test failed: ${error.message}`;
+            log('error', 'Browser direct cache test failed.', { message: error.message, name: error.name });
+        } finally {
+            directTestButton.disabled = false;
+        }
+    });
+
+    exportDirectButton.addEventListener('click', exportDirectTestReport);
     exportPromptButton.addEventListener('click', exportPromptSnapshot);
     exportButton.addEventListener('click', exportLogs);
 
