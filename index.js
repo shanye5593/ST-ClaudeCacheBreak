@@ -9,6 +9,7 @@ const MAX_LOG_ENTRIES = 100;
 const defaultSettings = {
     enabled: true,
     debug: true,
+    autoGenerate: false,
     directBaseUrl: '',
     directModel: '',
     directMaxTokens: '512',
@@ -18,8 +19,10 @@ const defaultSettings = {
 let settings = loadSettings();
 let logEntries = [];
 let logElement = null;
+let testStatusElement = null;
 let lastPromptSnapshot = null;
 let lastDirectTestReport = null;
+let lastGeneratedText = '';
 let csrfTokenCache = null;
 
 function loadSettings() {
@@ -692,24 +695,28 @@ async function getTavernRequestHeaders() {
     throw new Error('Could not get SillyTavern request headers or CSRF token.');
 }
 
+function getTavernBackendPayload({ baseUrl, apiKey, body }) {
+    return {
+        chat_completion_source: 'custom',
+        custom_url: getOpenAiBaseUrl(baseUrl),
+        model: body.model,
+        messages: body.messages,
+        temperature: body.temperature,
+        max_tokens: body.max_tokens,
+        stream: false,
+        custom_include_headers: JSON.stringify({
+            Authorization: `Bearer ${apiKey}`,
+        }),
+    };
+}
+
 async function sendTavernBackendChatCompletion({ baseUrl, apiKey, body }) {
     const startedAt = performance.now();
     const headers = await getTavernRequestHeaders();
     const response = await fetch('/api/backends/chat-completions/generate', {
         method: 'POST',
         headers,
-        body: JSON.stringify({
-            chat_completion_source: 'custom',
-            custom_url: getOpenAiBaseUrl(baseUrl),
-            model: body.model,
-            messages: body.messages,
-            temperature: body.temperature,
-            max_tokens: body.max_tokens,
-            stream: false,
-            custom_include_headers: JSON.stringify({
-                Authorization: `Bearer ${apiKey}`,
-            }),
-        }),
+        body: JSON.stringify(getTavernBackendPayload({ baseUrl, apiKey, body })),
     });
 
     return parseResponse(response, startedAt);
@@ -730,6 +737,175 @@ async function runTavernBackendCacheTest({ baseUrl, apiKey, model, maxTokens, te
         request,
         first,
         second,
+    });
+}
+
+function extractAssistantText(responseJson) {
+    return responseJson?.choices?.[0]?.message?.content
+        ?? responseJson?.choices?.[0]?.text
+        ?? '';
+}
+
+function getStContext() {
+    try {
+        return window.SillyTavern?.getContext?.() ?? null;
+    } catch {
+        return null;
+    }
+}
+
+function injectTextToChat(text, identity = 'char') {
+    const context = getStContext();
+
+    if (!context) {
+        return { ok: false, reason: 'no-context' };
+    }
+
+    if (!Array.isArray(context.chat)) {
+        return { ok: false, reason: 'no-chat' };
+    }
+
+    const isUser = identity === 'user';
+    const isSystem = identity === 'narrator';
+    const name = isUser
+        ? (context.name1 || 'You')
+        : isSystem
+            ? 'Claude Cache Break'
+            : (context.name2 || 'Character');
+    const message = {
+        name,
+        is_user: isUser,
+        is_system: isSystem,
+        send_date: new Date().toISOString(),
+        mes: text || ' ',
+        extra: {
+            from: 'Claude Cache Break',
+            transport: 'tavern-backend',
+        },
+    };
+
+    try {
+        context.chat.push(message);
+        const messageIndex = context.chat.length - 1;
+
+        if (typeof context.addOneMessage === 'function') {
+            context.addOneMessage(message, { scroll: true });
+        }
+
+        try {
+            const eventName = context.event_types?.CHARACTER_MESSAGE_RENDERED;
+
+            if (eventName && context.eventSource?.emit) {
+                context.eventSource.emit(eventName, messageIndex);
+            }
+        } catch {}
+
+        if (typeof context.saveChatConditional === 'function') {
+            void context.saveChatConditional();
+        } else if (typeof context.saveChat === 'function') {
+            void context.saveChat();
+        }
+
+        return { ok: true, messageIndex };
+    } catch (error) {
+        return { ok: false, reason: 'failed', error: error.message };
+    }
+}
+
+function insertTextToInput(text) {
+    const textarea = document.querySelector('#send_textarea');
+
+    if (!textarea) {
+        return { ok: false, reason: 'no-input' };
+    }
+
+    textarea.value = text;
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+
+    try {
+        textarea.focus();
+        textarea.setSelectionRange(text.length, text.length);
+        textarea.scrollTop = textarea.scrollHeight;
+    } catch {}
+
+    return { ok: true };
+}
+
+function getPanelApiKey() {
+    return document.querySelector('#claude_cache_break_direct_api_key')?.value || '';
+}
+
+function getGenerationConfig() {
+    return {
+        baseUrl: settings.directBaseUrl,
+        apiKey: getPanelApiKey(),
+        model: settings.directModel,
+        maxTokens: settings.directMaxTokens,
+        temperature: settings.directTemperature,
+    };
+}
+
+function isGenerationConfigReady(config) {
+    return Boolean(config.baseUrl && config.apiKey && config.model);
+}
+
+async function runTavernBackendGenerate({ baseUrl, apiKey, model, maxTokens, temperature }) {
+    const requestBody = buildChatCompletionsBody({ model, maxTokens, temperature });
+    const result = await sendTavernBackendChatCompletion({ baseUrl, apiKey, body: requestBody });
+    const text = extractAssistantText(result.response);
+
+    if (!result.ok) {
+        throw new Error(`HTTP ${result.status}: ${JSON.stringify(result.response).slice(0, 300)}`);
+    }
+
+    if (!text) {
+        throw new Error('No assistant text found in response.');
+    }
+
+    lastGeneratedText = text;
+
+    return {
+        exportedAt: new Date().toISOString(),
+        transport: 'tavern-backend-generate',
+        request: {
+            url: '/api/backends/chat-completions/generate',
+            upstreamBaseUrl: getOpenAiBaseUrl(baseUrl),
+            body: requestBody,
+        },
+        response: result,
+        text,
+    };
+}
+
+async function autoGenerateAndInject() {
+    const config = getGenerationConfig();
+
+    if (!isGenerationConfigReady(config)) {
+        throw new Error('Auto generate is enabled, but Base URL, API Key, or Model is missing in the plugin panel.');
+    }
+
+    if (testStatusElement) {
+        testStatusElement.textContent = 'Auto generating via SillyTavern backend...';
+    }
+
+    log('info', 'Auto generation started.');
+    const result = await runTavernBackendGenerate(config);
+    const injectResult = injectTextToChat(result.text, 'char');
+
+    if (!injectResult.ok) {
+        throw new Error(`Injection failed: ${injectResult.reason || injectResult.error || 'unknown'}`);
+    }
+
+    lastDirectTestReport = result;
+
+    if (testStatusElement) {
+        testStatusElement.textContent = `Auto generated and injected as character. ${formatUsageLine('Usage', result.response)}`;
+    }
+
+    log('info', 'Auto generated and injected reply.', {
+        messageIndex: injectResult.messageIndex,
+        usage: result.response?.usage,
+        textLength: result.text.length,
     });
 }
 
@@ -760,8 +936,12 @@ function createSettingsPanel() {
             <input id="claude_cache_break_debug" type="checkbox">
             <span>Mirror logs to browser console</span>
         </label>
+        <label class="checkbox_label claude-cache-break-row">
+            <input id="claude_cache_break_auto_generate" type="checkbox">
+            <span>Auto generate via Tavern backend and inject as character</span>
+        </label>
         <div class="claude-cache-break-direct">
-            <div class="claude-cache-break-subtitle">Plugin cache tests</div>
+            <div class="claude-cache-break-subtitle">Plugin generation and cache tests</div>
             <label class="claude-cache-break-field">
                 <span>Base URL</span>
                 <input id="claude_cache_break_direct_base_url" class="text_pole" type="text" placeholder="https://api.pioneer.ai or https://api.pioneer.ai/v1">
@@ -785,11 +965,16 @@ function createSettingsPanel() {
                 </label>
             </div>
             <div class="claude-cache-break-actions">
+                <button id="claude_cache_break_generate_char" class="menu_button">Generate as character</button>
+                <button id="claude_cache_break_generate_narrator" class="menu_button">Generate as narrator</button>
+                <button id="claude_cache_break_insert_input" class="menu_button">Insert last reply to input</button>
+            </div>
+            <div class="claude-cache-break-actions">
                 <button id="claude_cache_break_tavern_backend_test" class="menu_button">Tavern backend test x2</button>
                 <button id="claude_cache_break_direct_test" class="menu_button">Browser direct test x2</button>
                 <button id="claude_cache_break_export_direct" class="menu_button">Export test report</button>
             </div>
-            <div id="claude_cache_break_direct_status" class="claude-cache-break-status">Trigger one normal generation first, then test the latest converted prompt. Try Tavern backend first; browser direct may fail from CORS.</div>
+            <div id="claude_cache_break_direct_status" class="claude-cache-break-status">Trigger one normal generation first, then generate or test the latest converted prompt. Tavern backend avoids CORS.</div>
         </div>
         <div class="claude-cache-break-actions">
             <button id="claude_cache_break_export_prompt" class="menu_button">Export prompt JSON</button>
@@ -803,15 +988,20 @@ function createSettingsPanel() {
 
     const enabledInput = panel.querySelector('#claude_cache_break_enabled');
     const debugInput = panel.querySelector('#claude_cache_break_debug');
+    const autoGenerateInput = panel.querySelector('#claude_cache_break_auto_generate');
     const directBaseUrlInput = panel.querySelector('#claude_cache_break_direct_base_url');
     const directApiKeyInput = panel.querySelector('#claude_cache_break_direct_api_key');
     const directModelInput = panel.querySelector('#claude_cache_break_direct_model');
     const directMaxTokensInput = panel.querySelector('#claude_cache_break_direct_max_tokens');
     const directTemperatureInput = panel.querySelector('#claude_cache_break_direct_temperature');
+    const generateCharButton = panel.querySelector('#claude_cache_break_generate_char');
+    const generateNarratorButton = panel.querySelector('#claude_cache_break_generate_narrator');
+    const insertInputButton = panel.querySelector('#claude_cache_break_insert_input');
     const tavernBackendTestButton = panel.querySelector('#claude_cache_break_tavern_backend_test');
     const directTestButton = panel.querySelector('#claude_cache_break_direct_test');
     const exportDirectButton = panel.querySelector('#claude_cache_break_export_direct');
     const directStatusElement = panel.querySelector('#claude_cache_break_direct_status');
+    testStatusElement = directStatusElement;
     const exportPromptButton = panel.querySelector('#claude_cache_break_export_prompt');
     const exportButton = panel.querySelector('#claude_cache_break_export_log');
     const clearButton = panel.querySelector('#claude_cache_break_clear_log');
@@ -819,6 +1009,7 @@ function createSettingsPanel() {
 
     enabledInput.checked = settings.enabled;
     debugInput.checked = settings.debug;
+    autoGenerateInput.checked = settings.autoGenerate;
     directBaseUrlInput.value = settings.directBaseUrl;
     directModelInput.value = settings.directModel;
     directMaxTokensInput.value = settings.directMaxTokens;
@@ -836,6 +1027,12 @@ function createSettingsPanel() {
         log('info', `Console logging ${settings.debug ? 'enabled' : 'disabled'}.`);
     });
 
+    autoGenerateInput.addEventListener('change', () => {
+        settings.autoGenerate = autoGenerateInput.checked;
+        saveSettings();
+        log('info', `Auto generate ${settings.autoGenerate ? 'enabled' : 'disabled'}.`);
+    });
+
     const saveDirectSettings = () => {
         settings.directBaseUrl = directBaseUrlInput.value;
         settings.directModel = directModelInput.value;
@@ -849,7 +1046,15 @@ function createSettingsPanel() {
     directMaxTokensInput.addEventListener('input', saveDirectSettings);
     directTemperatureInput.addEventListener('input', saveDirectSettings);
 
-    const runPanelCacheTest = async ({ label, runningText, button, test }) => {
+    const setActionButtonsDisabled = (disabled) => {
+        generateCharButton.disabled = disabled;
+        generateNarratorButton.disabled = disabled;
+        insertInputButton.disabled = disabled;
+        tavernBackendTestButton.disabled = disabled;
+        directTestButton.disabled = disabled;
+    };
+
+    const runPanelCacheTest = async ({ label, runningText, test }) => {
         saveDirectSettings();
 
         if (!directBaseUrlInput.value || !directApiKeyInput.value || !directModelInput.value) {
@@ -858,8 +1063,7 @@ function createSettingsPanel() {
             return;
         }
 
-        tavernBackendTestButton.disabled = true;
-        directTestButton.disabled = true;
+        setActionButtonsDisabled(true);
         directStatusElement.textContent = runningText;
         log('info', `Starting ${label}.`);
 
@@ -887,23 +1091,71 @@ function createSettingsPanel() {
             directStatusElement.textContent = `${label} failed: ${error.message}`;
             log('error', `${label} failed.`, { message: error.message, name: error.name });
         } finally {
-            button.disabled = false;
-            tavernBackendTestButton.disabled = false;
-            directTestButton.disabled = false;
+            setActionButtonsDisabled(false);
         }
     };
+
+    const runPanelGenerate = async (identity) => {
+        saveDirectSettings();
+
+        const config = getGenerationConfig();
+
+        if (!isGenerationConfigReady(config)) {
+            directStatusElement.textContent = 'Base URL, API Key, and Model are required.';
+            log('warn', 'Generate skipped because required fields are missing.');
+            return;
+        }
+
+        setActionButtonsDisabled(true);
+        directStatusElement.textContent = `Generating via SillyTavern backend as ${identity}...`;
+        log('info', 'Starting Tavern backend generate.', { identity });
+
+        try {
+            const result = await runTavernBackendGenerate(config);
+            const injectResult = injectTextToChat(result.text, identity);
+
+            if (!injectResult.ok) {
+                throw new Error(`Injection failed: ${injectResult.reason || injectResult.error || 'unknown'}`);
+            }
+
+            lastDirectTestReport = result;
+            directStatusElement.textContent = `Generated and injected as ${identity}. ${formatUsageLine('Usage', result.response)}`;
+            log('info', 'Generated and injected reply.', {
+                identity,
+                messageIndex: injectResult.messageIndex,
+                usage: result.response?.usage,
+                textLength: result.text.length,
+            });
+        } catch (error) {
+            directStatusElement.textContent = `Generate failed: ${error.message}`;
+            log('error', 'Generate failed.', { message: error.message, name: error.name });
+        } finally {
+            setActionButtonsDisabled(false);
+        }
+    };
+
+    generateCharButton.addEventListener('click', () => runPanelGenerate('char'));
+    generateNarratorButton.addEventListener('click', () => runPanelGenerate('narrator'));
+    insertInputButton.addEventListener('click', () => {
+        if (!lastGeneratedText) {
+            directStatusElement.textContent = 'No generated reply is available yet.';
+            log('warn', 'Insert to input skipped because there is no generated reply.');
+            return;
+        }
+
+        const result = insertTextToInput(lastGeneratedText);
+        directStatusElement.textContent = result.ok ? 'Inserted last reply to input.' : `Insert failed: ${result.reason}`;
+    });
 
     tavernBackendTestButton.addEventListener('click', () => runPanelCacheTest({
         label: 'Tavern backend cache test',
         runningText: 'Sending two requests through SillyTavern backend...',
-        button: tavernBackendTestButton,
         test: runTavernBackendCacheTest,
     }));
 
     directTestButton.addEventListener('click', () => runPanelCacheTest({
         label: 'Browser direct cache test',
         runningText: 'Sending two browser direct requests...',
-        button: directTestButton,
         test: runDirectCacheTest,
     }));
 
@@ -955,11 +1207,26 @@ eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, async (data) => {
         if (result.overflowRemoved > 0) {
             log('warn', `Removed ${result.overflowRemoved} marker(s) without cache_control because Claude supports at most ${MAX_BREAKPOINTS} cache breakpoints per request.`);
         }
-
-        return;
+    } else {
+        log('info', 'No cache break markers found.', { messages: data.chat.length });
     }
 
-    log('info', 'No cache break markers found.', { messages: data.chat.length });
+    if (settings.autoGenerate) {
+        const config = getGenerationConfig();
+
+        if (!isGenerationConfigReady(config)) {
+            log('warn', 'Auto generate is enabled but required panel fields are missing; original request will continue.');
+            return;
+        }
+
+        try {
+            await autoGenerateAndInject();
+        } catch (error) {
+            log('error', 'Auto generate failed; original request was stopped to avoid possible double billing.', { message: error.message, name: error.name });
+        }
+
+        throw new Error('Claude Cache Break handled generation via Tavern backend; original request stopped.');
+    }
 });
 
 if (document.readyState === 'loading') {

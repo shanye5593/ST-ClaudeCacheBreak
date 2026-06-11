@@ -39,37 +39,23 @@ The panel includes:
 - Mirror logs to browser console
 - Export converted prompt JSON
 - Export log txt
-- Experimental Tavern backend and browser direct cache tests using the latest converted prompt snapshot
+- Experimental Tavern backend generation, chat injection, and cache tests using the latest converted prompt snapshot
 - A live log showing trigger status, skipped reasons, marker counts, injected breakpoints, and changed messages
 
-## Plugin cache tests
+## Plugin generation and cache tests
 
-The experimental cache tests send the latest converted prompt snapshot twice, then report cache usage fields. They are intended for local diagnosis only.
+The experimental generation and cache tools use the latest converted prompt snapshot and SillyTavern's own `/api/backends/chat-completions/generate` forwarding endpoint, avoiding browser CORS while still being plugin-driven.
 
-1. Trigger one normal SillyTavern generation so the extension captures a converted prompt snapshot.
-2. Enter Base URL, API Key, Model, and token options in the extension panel.
-3. Click **Tavern backend test x2** first. This uses SillyTavern's own `/api/backends/chat-completions/generate` forwarding endpoint, avoiding browser CORS while still being plugin-driven.
-4. If needed, click **Browser direct test x2** as a fallback diagnostic. Browser direct calls may fail if the endpoint does not allow CORS.
-5. Check the status line or export the test report JSON.
+1. Enter Base URL, API Key, Model, and token options in the extension panel.
+2. Trigger one normal SillyTavern generation so the extension captures a converted prompt snapshot.
+3. Click **Generate as character** to make one non-streaming Tavern-backend request and inject the reply as a character message.
+4. Click **Generate as narrator** to inject the reply as a narrator/system message instead.
+5. Click **Tavern backend test x2** to send the same converted prompt twice and report cache usage fields.
+6. If needed, click **Browser direct test x2** as a fallback diagnostic. Browser direct calls may fail if the endpoint does not allow CORS.
+
+The **Auto generate via Tavern backend and inject as character** option attempts to handle normal SillyTavern generation automatically: after the prompt is prepared, the extension calls the Tavern backend forwarding endpoint, injects the reply as a character message, and stops the original request to avoid double billing. Leave it off while configuring or testing.
 
 The API key is only kept in the current page session and is not saved to localStorage.
-
-## Local proxy mode
-
-For routes where SillyTavern or the browser does not preserve/send `cache_control`, use the included local proxy in `proxy/`.
-
-1. Run `proxy/start-proxy.bat`.
-2. In SillyTavern Chat Completion settings, use:
-
-```text
-Base URL: http://127.0.0.1:8788
-API Key: your Pioneer API key
-Model: claude-opus-4-6 or your Pioneer model name
-```
-
-The proxy accepts SillyTavern's normal OpenAI-compatible request, converts `[[CACHE_BREAK]]` markers immediately before forwarding, and sends the request to Pioneer. Keep the proxy terminal window open while using SillyTavern.
-
-See `proxy/README.md` for details.
 
 ## Notes
 
