@@ -1,1 +1,37 @@
-/* Claude Cache Break has no UI in this version. */
+.claude-cache-break-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 10px 0;
+    padding: 10px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+}
+
+.claude-cache-break-title {
+    font-weight: 700;
+}
+
+.claude-cache-break-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.claude-cache-break-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.claude-cache-break-log {
+    min-height: 120px;
+    max-height: 240px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    padding: 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.35;
+}

@@ -3,6 +3,64 @@ import { eventSource, event_types, main_api } from '../../../../script.js';
 const MARKER = '[[CACHE_BREAK]]';
 const MAX_BREAKPOINTS = 4;
 const LOG_PREFIX = '[Claude Cache Break]';
+const SETTINGS_KEY = 'ClaudeCacheBreakSettings';
+const MAX_LOG_ENTRIES = 100;
+
+const defaultSettings = {
+    enabled: true,
+    debug: true,
+};
+
+let settings = loadSettings();
+let logEntries = [];
+let logElement = null;
+
+function loadSettings() {
+    try {
+        return { ...defaultSettings, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') };
+    } catch {
+        return { ...defaultSettings };
+    }
+}
+
+function saveSettings() {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function log(level, message, details = null) {
+    const entry = {
+        time: new Date().toLocaleTimeString(),
+        level,
+        message,
+        details,
+    };
+
+    logEntries.push(entry);
+
+    if (logEntries.length > MAX_LOG_ENTRIES) {
+        logEntries.shift();
+    }
+
+    if (settings.debug || level === 'warn' || level === 'error') {
+        const consoleMethod = console[level] || console.log;
+        consoleMethod(`${LOG_PREFIX} ${message}`, details || '');
+    }
+
+    renderLogs();
+}
+
+function renderLogs() {
+    if (!logElement) {
+        return;
+    }
+
+    logElement.textContent = logEntries.map((entry) => {
+        const details = entry.details ? ` ${JSON.stringify(entry.details)}` : '';
+        return `[${entry.time}] ${entry.level.toUpperCase()} ${entry.message}${details}`;
+    }).join('\n');
+
+    logElement.scrollTop = logElement.scrollHeight;
+}
 
 function isTextBlock(block) {
     return block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string';
@@ -144,8 +202,11 @@ function applyCacheBreaks(messages) {
     let injected = 0;
     let removed = 0;
     let changedMessages = 0;
+    const modifiedMessages = [];
 
-    for (const message of messages) {
+    for (let index = 0; index < messages.length; index++) {
+        const message = messages[index];
+
         if (remainingBreakpoints <= 0) {
             continue;
         }
@@ -159,6 +220,7 @@ function applyCacheBreaks(messages) {
                 removed += result.removed;
                 remainingBreakpoints -= result.injected;
                 changedMessages++;
+                modifiedMessages.push({ index, role: message.role, source: 'string' });
             }
 
             continue;
@@ -173,6 +235,7 @@ function applyCacheBreaks(messages) {
                 removed += result.removed;
                 remainingBreakpoints -= result.injected;
                 changedMessages++;
+                modifiedMessages.push({ index, role: message.role, source: 'content-array' });
             }
         }
     }
@@ -185,32 +248,117 @@ function applyCacheBreaks(messages) {
         injected,
         removed,
         changedMessages,
+        modifiedMessages,
         overflowRemoved,
     };
 }
 
+function createSettingsPanel() {
+    if (document.getElementById('claude_cache_break_panel')) {
+        return;
+    }
+
+    const parent = document.querySelector('#extensions_settings2')
+        || document.querySelector('#extensions_settings')
+        || document.querySelector('#extensionsMenu');
+
+    if (!parent) {
+        log('warn', 'Could not find an extension settings container; conversion still works.');
+        return;
+    }
+
+    const panel = document.createElement('div');
+    panel.id = 'claude_cache_break_panel';
+    panel.className = 'claude-cache-break-panel';
+    panel.innerHTML = `
+        <div class="claude-cache-break-title">Claude Cache Break</div>
+        <label class="checkbox_label claude-cache-break-row">
+            <input id="claude_cache_break_enabled" type="checkbox">
+            <span>Enable marker conversion</span>
+        </label>
+        <label class="checkbox_label claude-cache-break-row">
+            <input id="claude_cache_break_debug" type="checkbox">
+            <span>Mirror logs to browser console</span>
+        </label>
+        <div class="claude-cache-break-actions">
+            <button id="claude_cache_break_clear_log" class="menu_button">Clear log</button>
+        </div>
+        <pre id="claude_cache_break_log" class="claude-cache-break-log"></pre>
+    `;
+
+    parent.appendChild(panel);
+
+    const enabledInput = panel.querySelector('#claude_cache_break_enabled');
+    const debugInput = panel.querySelector('#claude_cache_break_debug');
+    const clearButton = panel.querySelector('#claude_cache_break_clear_log');
+    logElement = panel.querySelector('#claude_cache_break_log');
+
+    enabledInput.checked = settings.enabled;
+    debugInput.checked = settings.debug;
+
+    enabledInput.addEventListener('change', () => {
+        settings.enabled = enabledInput.checked;
+        saveSettings();
+        log('info', `Conversion ${settings.enabled ? 'enabled' : 'disabled'}.`);
+    });
+
+    debugInput.addEventListener('change', () => {
+        settings.debug = debugInput.checked;
+        saveSettings();
+        log('info', `Console logging ${settings.debug ? 'enabled' : 'disabled'}.`);
+    });
+
+    clearButton.addEventListener('click', () => {
+        logEntries = [];
+        renderLogs();
+    });
+
+    renderLogs();
+    log('info', 'Settings panel ready.');
+}
+
 eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, async (data) => {
     if (data?.dryRun) {
+        log('info', 'Skipped dry run.');
+        return;
+    }
+
+    if (!settings.enabled) {
+        log('info', 'Skipped because conversion is disabled.');
         return;
     }
 
     if (!isChatCompletion()) {
+        log('info', 'Skipped because current API mode is not Chat Completion.', { main_api });
         return;
     }
 
     if (!Array.isArray(data?.chat)) {
+        log('warn', 'Skipped because prompt data.chat is not an array.');
         return;
     }
 
     const result = applyCacheBreaks(data.chat);
 
     if (result.removed > 0 || result.injected > 0) {
-        console.debug(`${LOG_PREFIX} removed ${result.removed} marker(s), injected ${result.injected} cache breakpoint(s), existing ${result.existingBreakpoints}, changed ${result.changedMessages} message(s).`);
+        log('info', 'Converted cache break markers.', result);
 
         if (result.overflowRemoved > 0) {
-            console.warn(`${LOG_PREFIX} removed ${result.overflowRemoved} marker(s) without cache_control because Claude supports at most ${MAX_BREAKPOINTS} cache breakpoints per request.`);
+            log('warn', `Removed ${result.overflowRemoved} marker(s) without cache_control because Claude supports at most ${MAX_BREAKPOINTS} cache breakpoints per request.`);
         }
+
+        return;
     }
+
+    log('info', 'No cache break markers found.', { messages: data.chat.length });
 });
 
-console.debug(`${LOG_PREFIX} loaded.`);
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', createSettingsPanel);
+} else {
+    createSettingsPanel();
+}
+
+eventSource.on(event_types.APP_READY, createSettingsPanel);
+
+log('info', 'Loaded.');

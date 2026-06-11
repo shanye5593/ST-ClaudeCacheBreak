@@ -29,10 +29,21 @@ The marker is removed before the request is sent. The text block before the mark
 }
 ```
 
+## Panel and logs
+
+The extension adds a **Claude Cache Break** panel to the extensions settings area.
+
+The panel includes:
+
+- Enable marker conversion
+- Mirror logs to browser console
+- Clear log
+- A live log showing trigger status, skipped reasons, marker counts, injected breakpoints, and changed messages
+
 ## Notes
 
 - Runs in SillyTavern's Chat Completion mode, including OpenRouter, custom OpenAI-compatible endpoints, and Claude-compatible reverse proxies.
 - Use it only with routes that ultimately reach Claude and preserve Anthropic-style `cache_control` content blocks.
 - Claude supports up to 4 prompt-cache breakpoints per request; extra markers are removed but not cached.
 - Put markers after large, stable content. Dynamic content before a marker will reduce cache hits.
-- Check the browser console for `[Claude Cache Break]` debug messages.
+- Check the panel log or browser console for `[Claude Cache Break]` debug messages.
