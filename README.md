@@ -31,7 +31,7 @@ The marker is removed before the request is sent. The text block before the mark
 
 ## Notes
 
-- Designed for Claude models used through SillyTavern's chat-completion/OpenRouter flow.
+- Runs in SillyTavern's chat-completion/OpenRouter flow; use it with Claude models.
 - Claude supports up to 4 prompt-cache breakpoints per request; extra markers are removed but not cached.
 - Put markers after large, stable content. Dynamic content before a marker will reduce cache hits.
 - Check the browser console for `[Claude Cache Break]` debug messages.
