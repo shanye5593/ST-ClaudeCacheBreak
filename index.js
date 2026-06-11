@@ -88,6 +88,96 @@ function stripMarkers(value) {
     return value.split(MARKER).join('');
 }
 
+function countMarkers(value) {
+    return value.split(MARKER).length - 1;
+}
+
+function isMarkerOnlyText(text) {
+    return text.includes(MARKER) && stripMarkers(text).trim() === '';
+}
+
+function isMarkerOnlyContent(content) {
+    if (typeof content === 'string') {
+        return isMarkerOnlyText(content);
+    }
+
+    if (!Array.isArray(content) || content.length === 0) {
+        return false;
+    }
+
+    return content.every((block) => isTextBlock(block) && stripMarkers(block.text).trim() === '')
+        && content.some((block) => block.text.includes(MARKER));
+}
+
+function countMarkersInContent(content) {
+    if (typeof content === 'string') {
+        return countMarkers(content);
+    }
+
+    if (!Array.isArray(content)) {
+        return 0;
+    }
+
+    return content.reduce((total, block) => total + (isTextBlock(block) ? countMarkers(block.text) : 0), 0);
+}
+
+function findLastTextBlock(content) {
+    if (!Array.isArray(content)) {
+        return null;
+    }
+
+    for (let index = content.length - 1; index >= 0; index--) {
+        const block = content[index];
+
+        if (isTextBlock(block) && block.text.trim()) {
+            return block;
+        }
+    }
+
+    return null;
+}
+
+function canAddCacheControlToMessage(message) {
+    if (typeof message?.content === 'string') {
+        return message.content.trim() !== '';
+    }
+
+    const block = findLastTextBlock(message?.content);
+    return Boolean(block && !block.cache_control);
+}
+
+function findPreviousCacheTarget(messages, markerIndex) {
+    for (let index = markerIndex - 1; index >= 0; index--) {
+        const message = messages[index];
+
+        if (!isMarkerOnlyContent(message?.content) && canAddCacheControlToMessage(message)) {
+            return index;
+        }
+    }
+
+    return -1;
+}
+
+function addCacheControlToMessage(message) {
+    if (typeof message?.content === 'string') {
+        message.content = [{
+            type: 'text',
+            text: message.content,
+            cache_control: { type: 'ephemeral' },
+        }];
+        return true;
+    }
+
+    const block = findLastTextBlock(message?.content);
+
+    if (!block || block.cache_control) {
+        return false;
+    }
+
+    block.cache_control = { type: 'ephemeral' };
+    return true;
+}
+
 function isChatCompletion() {
     return main_api === 'openai';
 }
@@ -203,9 +293,29 @@ function applyCacheBreaks(messages) {
     let removed = 0;
     let changedMessages = 0;
     const modifiedMessages = [];
+    const indexesToRemove = [];
 
     for (let index = 0; index < messages.length; index++) {
         const message = messages[index];
+
+        if (remainingBreakpoints > 0 && isMarkerOnlyContent(message?.content)) {
+            const markerCount = countMarkersInContent(message.content);
+            const targetIndex = findPreviousCacheTarget(messages, index);
+
+            removed += markerCount;
+            changedMessages++;
+            indexesToRemove.push(index);
+
+            if (targetIndex >= 0 && addCacheControlToMessage(messages[targetIndex])) {
+                injected++;
+                remainingBreakpoints--;
+                modifiedMessages.push({ index, role: message.role, source: 'standalone-marker', appliedTo: targetIndex });
+            } else {
+                modifiedMessages.push({ index, role: message.role, source: 'standalone-marker', appliedTo: null });
+            }
+
+            continue;
+        }
 
         if (remainingBreakpoints <= 0) {
             continue;
@@ -238,6 +348,10 @@ function applyCacheBreaks(messages) {
                 modifiedMessages.push({ index, role: message.role, source: 'content-array' });
             }
         }
+    }
+
+    for (let index = indexesToRemove.length - 1; index >= 0; index--) {
+        messages.splice(indexesToRemove[index], 1);
     }
 
     const overflowRemoved = removeOverflowMarkers(messages);
