@@ -1,5 +1,4 @@
 import { eventSource, event_types, main_api } from '../../../../script.js';
-import { chat_completion_sources, oai_settings } from '../../../openai.js';
 
 const MARKER = '[[CACHE_BREAK]]';
 const MAX_BREAKPOINTS = 4;
@@ -31,8 +30,8 @@ function stripMarkers(value) {
     return value.split(MARKER).join('');
 }
 
-function isOpenRouterChatCompletion() {
-    return main_api === 'openai' && oai_settings.chat_completion_source === chat_completion_sources.OPENROUTER;
+function isChatCompletion() {
+    return main_api === 'openai';
 }
 
 function transformText(text, remainingBreakpoints) {
@@ -195,7 +194,7 @@ eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, async (data) => {
         return;
     }
 
-    if (!isOpenRouterChatCompletion()) {
+    if (!isChatCompletion()) {
         return;
     }
 

@@ -1,6 +1,6 @@
 # Claude Cache Break
 
-A SillyTavern third-party extension that converts `[[CACHE_BREAK]]` markers in chat-completion prompts into Claude/OpenRouter prompt-cache breakpoints.
+A SillyTavern third-party extension that converts `[[CACHE_BREAK]]` markers in chat-completion prompts into Claude prompt-cache breakpoints.
 
 ## Usage
 
@@ -31,7 +31,8 @@ The marker is removed before the request is sent. The text block before the mark
 
 ## Notes
 
-- Runs in SillyTavern's chat-completion/OpenRouter flow; use it with Claude models.
+- Runs in SillyTavern's Chat Completion mode, including OpenRouter, custom OpenAI-compatible endpoints, and Claude-compatible reverse proxies.
+- Use it only with routes that ultimately reach Claude and preserve Anthropic-style `cache_control` content blocks.
 - Claude supports up to 4 prompt-cache breakpoints per request; extra markers are removed but not cached.
 - Put markers after large, stable content. Dynamic content before a marker will reduce cache hits.
 - Check the browser console for `[Claude Cache Break]` debug messages.
