@@ -14,6 +14,7 @@ const defaultSettings = {
 let settings = loadSettings();
 let logEntries = [];
 let logElement = null;
+let lastPromptSnapshot = null;
 
 function loadSettings() {
     try {
@@ -65,16 +66,30 @@ function renderLogs() {
     logElement.scrollTop = logElement.scrollHeight;
 }
 
-function exportLogs() {
-    const blob = new Blob([formatLogEntries()], { type: 'text/plain;charset=utf-8' });
+function downloadFile(content, filename, type) {
+    const blob = new Blob([content], { type });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
 
     link.href = url;
-    link.download = `claude-cache-break-${timestamp}.txt`;
+    link.download = filename;
     link.click();
     URL.revokeObjectURL(url);
+}
+
+function exportLogs() {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    downloadFile(formatLogEntries(), `claude-cache-break-${timestamp}.txt`, 'text/plain;charset=utf-8');
+}
+
+function exportPromptSnapshot() {
+    if (!lastPromptSnapshot) {
+        log('warn', 'No converted prompt snapshot is available yet.');
+        return;
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    downloadFile(JSON.stringify(lastPromptSnapshot, null, 2), `claude-cache-break-prompt-${timestamp}.json`, 'application/json;charset=utf-8');
 }
 
 function isTextBlock(block) {
@@ -469,6 +484,7 @@ function createSettingsPanel() {
             <span>Mirror logs to browser console</span>
         </label>
         <div class="claude-cache-break-actions">
+            <button id="claude_cache_break_export_prompt" class="menu_button">Export prompt JSON</button>
             <button id="claude_cache_break_export_log" class="menu_button">Export log txt</button>
             <button id="claude_cache_break_clear_log" class="menu_button">Clear log</button>
         </div>
@@ -479,6 +495,7 @@ function createSettingsPanel() {
 
     const enabledInput = panel.querySelector('#claude_cache_break_enabled');
     const debugInput = panel.querySelector('#claude_cache_break_debug');
+    const exportPromptButton = panel.querySelector('#claude_cache_break_export_prompt');
     const exportButton = panel.querySelector('#claude_cache_break_export_log');
     const clearButton = panel.querySelector('#claude_cache_break_clear_log');
     logElement = panel.querySelector('#claude_cache_break_log');
@@ -498,6 +515,7 @@ function createSettingsPanel() {
         log('info', `Console logging ${settings.debug ? 'enabled' : 'disabled'}.`);
     });
 
+    exportPromptButton.addEventListener('click', exportPromptSnapshot);
     exportButton.addEventListener('click', exportLogs);
 
     clearButton.addEventListener('click', () => {
@@ -531,6 +549,12 @@ eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, async (data) => {
     }
 
     const result = applyCacheBreaks(data.chat);
+    lastPromptSnapshot = {
+        exportedAt: new Date().toISOString(),
+        mainApi: main_api,
+        result: JSON.parse(JSON.stringify(result)),
+        chat: JSON.parse(JSON.stringify(data.chat)),
+    };
 
     if (result.removed > 0 || result.injected > 0) {
         log('info', 'Converted cache break markers.', result);
